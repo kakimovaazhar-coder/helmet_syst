@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Local databases and generated captures
+*.db
+backend/images/
+yolo/violations/
+
+# Secrets and service credentials
+backend/firebase_key.json
+helmet_app/android/app/google-services.json
+*.env
+.env
+.env.*
+
+# ML model/checkpoint artifacts
+*.pt
+*.pth
+*.onnx
+*.pkl
+yolo/faces/
+
+# Flutter / Dart generated files
+helmet_app/.dart_tool/
+helmet_app/build/
+helmet_app/.flutter-plugins
+helmet_app/.flutter-plugins-dependencies
+
+# IDE and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
