@@ -13,8 +13,6 @@ if not firebase_admin._apps:
     cred = credentials.Certificate("firebase_key.json")
     firebase_admin.initialize_app(cred)
 
-FCM_TOKEN = None
-
 app = FastAPI()
 
 Base.metadata.create_all(bind=engine)
@@ -28,6 +26,25 @@ app.add_middleware(
 )
 
 os.makedirs("images", exist_ok=True)
+TOKEN_FILE = "fcm_token.txt"
+
+
+def load_token():
+    if not os.path.exists(TOKEN_FILE):
+        return None
+
+    with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+        token = f.read().strip()
+
+    return token or None
+
+
+def save_token_to_file(token):
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        f.write(token)
+
+
+FCM_TOKEN = load_token()
 
 
 def get_risk_info(risk):
@@ -88,8 +105,20 @@ def send_push(token, title, body):
 def save_token(data: dict):
     global FCM_TOKEN
     FCM_TOKEN = data.get("token")
+    if FCM_TOKEN:
+        save_token_to_file(FCM_TOKEN)
     print("NEW TOKEN:", FCM_TOKEN)
     return {"ok": True}
+
+
+@app.post("/test_push")
+def test_push():
+    send_push(
+        FCM_TOKEN,
+        "Helmet Safety",
+        "Test notification",
+    )
+    return {"ok": bool(FCM_TOKEN)}
 
 
 @app.post("/event")

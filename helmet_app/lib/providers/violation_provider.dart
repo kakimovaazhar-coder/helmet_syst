@@ -13,6 +13,7 @@ class ViolationProvider extends ChangeNotifier {
 
   Timer? _timer;
   bool _isLoading = false;
+  bool _hasLoadedOnce = false;
 
   Function(Map)? onNewViolation;
   String? _lastEventId;
@@ -58,9 +59,13 @@ class ViolationProvider extends ChangeNotifier {
         final newest = newActive.first;
         if (_lastEventId != newest['event_id']) {
           _lastEventId = newest['event_id']?.toString();
-          onNewViolation?.call(newest);
+          if (_hasLoadedOnce) {
+            onNewViolation?.call(newest);
+          }
         }
       }
+
+      _hasLoadedOnce = true;
 
       var changed = false;
 

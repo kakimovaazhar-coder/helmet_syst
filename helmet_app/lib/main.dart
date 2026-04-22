@@ -21,6 +21,17 @@ void main() async {
   await NotificationService.init();
 
   final violationProvider = ViolationProvider();
+  violationProvider.onNewViolation = (event) {
+    final risk = event['risk']?.toString() ?? '0';
+    final duration = ((event['duration'] ?? 0) as num).round();
+
+    unawaited(
+      NotificationService.showNotification(
+        'Helmet Safety',
+        'Risk $risk - $duration sec',
+      ),
+    );
+  };
 
   FirebaseMessaging.onBackgroundMessage(_firebaseBackgroundHandler);
   await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(

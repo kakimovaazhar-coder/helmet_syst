@@ -14,6 +14,7 @@ yolo/violations/
 
 # Secrets and service credentials
 backend/firebase_key.json
+backend/fcm_token.txt
 helmet_app/android/app/google-services.json
 *.env
 .env
