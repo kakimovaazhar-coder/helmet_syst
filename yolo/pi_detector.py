@@ -10,6 +10,7 @@ from ultralytics import YOLO
 
 
 ZONE_WEIGHTS = {1: 1.0, 2: 1.2, 3: 1.5, 4: 2.0}
+CROP_MARGIN = 0.45
 
 
 # center of person in frame
@@ -30,6 +31,27 @@ def get_zone(x, y, w, h):
     if x < w // 2 and y >= h // 2:
         return 3
     return 4
+
+
+def crop_with_margin(frame, box):
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = map(int, box)
+
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    margin_x = int(box_w * CROP_MARGIN)
+    margin_y = int(box_h * CROP_MARGIN)
+
+    left = max(0, x1 - margin_x)
+    top = max(0, y1 - margin_y)
+    right = min(width, x2 + margin_x)
+    bottom = min(height, y2 + margin_y)
+
+    crop = frame[top:bottom, left:right]
+    if crop.size == 0:
+        return frame
+
+    return crop
 
 
 class UsbCamera:
@@ -148,13 +170,14 @@ class Detector:
         self.imgsz = args.imgsz
         self.miss_ttl = args.miss_ttl
         self.match_dist = args.match_dist
+        self.event_update_interval = args.event_update_interval
         self.preview = args.preview
         self.debug_detections = args.debug_detections
         self.last_debug_print = 0
         self.violations_dir = args.violations_dir
         self.people = {}
         self.next_pid = 1
-        self.daily_violations = {}
+        self.used_pids = set()
         self.buzzer = ActiveBuzzer(
             pin=args.buzzer_pin,
             enabled=not args.no_buzzer,
@@ -179,6 +202,9 @@ class Detector:
         best_dist = 9999
 
         for pid, person in self.people.items():
+            if pid in self.used_pids:
+                continue
+
             if now - person["last_update"] > self.miss_ttl:
                 continue
 
@@ -192,6 +218,7 @@ class Detector:
             person["center"] = c
             person["bbox"] = box
             person["last_update"] = now
+            self.used_pids.add(best_pid)
             return best_pid, person
 
         pid = self.next_pid
@@ -204,64 +231,99 @@ class Detector:
             "sent": False,
             "event_id": None,
             "zone": 1,
+            "max_zone": 1,
             "last_update": now,
             "active": False,
             "last_label": None,
             "label_count": 0,
+            "last_event_update": 0,
         }
 
+        self.used_pids.add(pid)
         return pid, self.people[pid]
 
     def post_event(self, filename, data):
         # send violation to laptop server
         def task():
-            try:
-                with open(filename, "rb") as f:
-                    requests.post(
-                        f"{self.server}/event",
-                        files={"file": f},
-                        data=data,
-                        timeout=4,
-                    )
-            except Exception as err:
-                print("API ERROR:", err)
+            for attempt in range(3):
+                try:
+                    with open(filename, "rb") as f:
+                        res = requests.post(
+                            f"{self.server}/event",
+                            files={"file": f},
+                            data=data,
+                            timeout=6,
+                        )
+
+                    if res.status_code == 200:
+                        return
+
+                    print("API ERROR:", res.status_code, res.text)
+                except Exception as err:
+                    print("API ERROR:", err)
+
+                time.sleep(1 + attempt)
 
         threading.Thread(target=task, daemon=True).start()
 
     def close_event(self, event_id):
         # close event when helmet is back or person is gone
         def task():
-            try:
-                requests.post(f"{self.server}/resolve/{event_id}", timeout=4)
-            except Exception as err:
-                print("CLOSE ERROR:", err)
+            for attempt in range(3):
+                try:
+                    res = requests.post(
+                        f"{self.server}/resolve/{event_id}",
+                        timeout=6,
+                    )
+
+                    if res.status_code == 200:
+                        return
+
+                    print("CLOSE ERROR:", res.status_code, res.text)
+                except Exception as err:
+                    print("CLOSE ERROR:", err)
+
+                time.sleep(1 + attempt)
 
         threading.Thread(target=task, daemon=True).start()
 
-    def send_violation(self, frame, pid, person, duration):
+    def update_event(self, event_id, duration, zone):
+        def task():
+            for attempt in range(3):
+                try:
+                    res = requests.post(
+                        f"{self.server}/event_update",
+                        json={
+                            "event_id": event_id,
+                            "duration": duration,
+                            "zone": zone,
+                        },
+                        timeout=6,
+                    )
+
+                    if res.status_code == 200:
+                        return
+
+                    print("UPDATE ERROR:", res.status_code, res.text)
+                except Exception as err:
+                    print("UPDATE ERROR:", err)
+
+                time.sleep(1 + attempt)
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def send_violation(self, frame, pid, person, duration, now):
         # called after no-helmet delay
-        event_id = str(int(time.time()))
+        event_id = f"{int(time.time() * 1000)}_{pid}"
         filename = os.path.join(self.violations_dir, f"{event_id}.jpg")
-        cv2.imwrite(filename, frame)
-
-        today = time.strftime("%Y-%m-%d")
-        if today not in self.daily_violations:
-            self.daily_violations[today] = 0
-
-        self.daily_violations[today] += 1
-        daily_count = self.daily_violations[today]
-
-        risk = duration * ZONE_WEIGHTS[person["zone"]] + daily_count * 4
-        if daily_count > 5:
-            risk += 15
-
-        risk = min(int(risk), 100)
+        crop = crop_with_margin(frame, person["bbox"])
+        cv2.imwrite(filename, crop)
 
         data = {
             "event_id": event_id,
             "duration": duration,
             "zone": person["zone"],
-            "risk": risk,
+            "risk": 0,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -270,6 +332,7 @@ class Detector:
         person["sent"] = True
         person["event_id"] = event_id
         person["active"] = True
+        person["last_event_update"] = now
 
     def handle_detection(self, frame, box, cls, conf, now):
         # logic for one detected person
@@ -299,6 +362,7 @@ class Detector:
 
         cx, cy = center((x1, y1, x2, y2))
         person["zone"] = get_zone(cx, cy, self.frame_size[0], self.frame_size[1])
+        person["max_zone"] = max(person.get("max_zone", 1), person["zone"])
 
         if raw_label == "no_helmet":
             if person["start"] is None:
@@ -306,15 +370,19 @@ class Detector:
 
             duration = now - person["start"]
             if duration > self.no_helmet_time and not person["sent"]:
-                self.send_violation(frame, pid, person, duration)
+                self.send_violation(frame, pid, person, duration, now)
+            elif person["sent"] and person["event_id"]:
+                if now - person.get("last_event_update", 0) >= self.event_update_interval:
+                    self.update_event(
+                        person["event_id"],
+                        duration,
+                        person["max_zone"],
+                    )
+                    person["last_event_update"] = now
         else:
-            if person["sent"] and person["active"]:
-                print(f"CLOSED PID {pid}")
-                self.close_event(person["event_id"])
-
             person["start"] = None
-            person["sent"] = False
-            person["active"] = False
+            if not person["sent"]:
+                person["active"] = False
 
         if self.preview:
             color = (0, 255, 0) if raw_label == "helmet" else (0, 0, 255)
@@ -346,12 +414,9 @@ class Detector:
         return False
 
     def cleanup_people(self, now):
-        # remove people lost by camera
+        # remove people lost by camera, but do not auto-resolve incidents
         for pid, person in list(self.people.items()):
             if now - person["last_update"] > self.auto_close_time:
-                if person.get("sent") and person.get("active"):
-                    print(f"AUTO CLOSE PID {pid}")
-                    self.close_event(person["event_id"])
                 del self.people[pid]
 
     def run(self):
@@ -375,6 +440,7 @@ class Detector:
                 )
 
                 if results and results[0].boxes is not None:
+                    self.used_pids = set()
                     boxes = results[0].boxes.xyxy.cpu().numpy()
                     classes = results[0].boxes.cls.cpu().numpy()
                     confs = results[0].boxes.conf.cpu().numpy()
@@ -428,10 +494,11 @@ def parse_args():
     parser.add_argument("--imgsz", type=int, default=320)
     parser.add_argument("--conf", type=float, default=0.6)
     parser.add_argument("--no-helmet-class", type=int, default=1)
-    parser.add_argument("--no-helmet-time", type=float, default=15)
+    parser.add_argument("--no-helmet-time", type=float, default=5)
     parser.add_argument("--auto-close-time", type=float, default=3)
     parser.add_argument("--miss-ttl", type=float, default=6)
-    parser.add_argument("--match-dist", type=float, default=150)
+    parser.add_argument("--match-dist", type=float, default=80)
+    parser.add_argument("--event-update-interval", type=float, default=5)
     parser.add_argument("--violations-dir", default="violations")
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--debug-detections", action="store_true")
